@@ -6,17 +6,6 @@ class Program
 
     public static int Main(string[] args)
     {
-        var expression = new BinaryExpression(
-            new UnaryExpression(new Token(TokenType.Minus, "-", null, 1), new LiteralExpression(123)),
-            new Token(TokenType.Star, "*", null, 1),
-            new GroupingExpression(new LiteralExpression(45.67)));
-
-        var printer = new AstPrinter();
-        printer.Print(expression);
-
-        return 0;
-
-#if false
         if (args.Length > 1)
         {
             Console.WriteLine("Usage: jlox [script]");
@@ -30,7 +19,6 @@ class Program
         {
             return RunPrompt();
         }
-#endif
     }
 
     private static int RunFile(string path)
@@ -63,17 +51,33 @@ class Program
     {
         var scanner = new Scanner(source);
         var tokens = scanner.ScanTokens();
+        var parser = new Parser(tokens);
+        var expression = parser.Parse();
 
-        // For now, just print the tokens.
-        foreach (var token in tokens)
+        if (hadError || expression == null)
         {
-            Console.WriteLine(token);
+            return;
         }
+
+        var printer = new AstPrinter();
+        printer.Print(expression);
     }
 
     public static void Error(int line, string message)
     {
         Report(line, "", message);
+    }
+
+    public static void Error(Token token, string message)
+    {
+        if (token.Type == TokenType.Eof)
+        {
+            Report(token.Line, " at end", message);
+        }
+        else
+        {
+            Report(token.Line, $"at '{token.Lexeme}'", message);
+        }
     }
 
     public static void Report(int line, string where, string message)
@@ -442,4 +446,218 @@ class AstPrinter
             _ => throw new NotImplementedException(),
         };
     }
+}
+
+class Parser
+{
+    private readonly List<Token> tokens;
+    private int current = 0;
+
+    public Parser(List<Token> tokens)
+    {
+        this.tokens = tokens;
+    }
+
+    public Expression? Parse()
+    {
+        try
+        {
+            return Expression();
+        }
+        catch (ParseException)
+        {
+            return null;
+        }
+    }
+
+    private Expression Expression()
+    {
+        return Equality();
+    }
+
+    private Expression Equality()
+    {
+        var expression = Comparison();
+
+        while (Match(TokenType.BangEqual, TokenType.EqualEqual))
+        {
+            var op = Previous();
+            var right = Comparison();
+            expression = new BinaryExpression(expression, op, right);
+        }
+
+        return expression;
+    }
+
+    private Expression Comparison()
+    {
+        var expression = Term();
+    
+        if (Match(TokenType.Greater, TokenType.GreaterEqual, TokenType.Less, TokenType.LessEqual))
+        {
+            var op = Previous();
+            var right = Term();
+            expression = new BinaryExpression(expression, op, right);
+        }
+
+        return expression;
+    }
+
+    private Expression Term()
+    {
+        var expression = Factor();
+
+        while (Match(TokenType.Minus, TokenType.Plus))
+        {
+            var op = Previous();
+            var right = Factor();
+            expression = new BinaryExpression(expression, op, right);
+        }
+
+        return expression;
+    }
+
+    private Expression Factor()
+    {
+        var expression = Unary();
+
+        while (Match(TokenType.Slash, TokenType.Star))
+        {
+            var op = Previous();
+            var right = Unary();
+            expression = new BinaryExpression(expression, op, right);
+        }
+
+        return expression;
+    }
+
+    private Expression Unary()
+    {
+        if (Match(TokenType.Bang, TokenType.Minus))
+        {
+            var op = Previous();
+            var right = Unary();
+            return new UnaryExpression(op, right);
+        }
+
+        return Primary();
+    }
+
+    private Expression Primary()
+    {
+        if (Match(TokenType.False))
+        {
+            return new LiteralExpression(false);
+        }
+        else if (Match(TokenType.True))
+        {
+            return new LiteralExpression(true);
+        }
+        else if (Match(TokenType.Nil))
+        {
+            return new LiteralExpression(null);
+        }
+
+        if (Match(TokenType.Number, TokenType.String))
+        {
+            return new LiteralExpression(Previous().Literal);
+        }
+
+        if (Match(TokenType.LeftParen))
+        {
+            var expression = Expression();
+            Consume(TokenType.RightParen, "Expected ')' after expression.");
+            return new GroupingExpression(expression);
+        }
+
+        throw Error(Peek(), "Expect expression.");
+    }
+
+    private bool Match(params TokenType[] types)
+    {
+        foreach (var type in types)
+        {
+            if (Check(type))
+            {
+                Advance();
+                return true;
+            }
+        }
+        
+        return false;
+    }
+
+    private Token Consume(TokenType type, string message)
+    {
+        if (Check(type))
+        {
+            return Advance();
+        }
+
+        throw Error(Peek(), message);
+    }
+
+    private ParseException Error(Token token, string message)
+    {
+        Program.Error(token, message);
+        return new ParseException();
+    }
+
+    private void Synchronize()
+    {
+        Advance();
+
+        while (!IsAtEnd)
+        {
+            if (Previous().Type == TokenType.Semicolon)
+            {
+                break;
+            }
+
+            switch (Peek().Type)
+            {
+                case TokenType.Class:
+                case TokenType.Fun:
+                case TokenType.Var:
+                case TokenType.For:
+                case TokenType.If:
+                case TokenType.While:
+                case TokenType.Print:
+                case TokenType.Return:
+                    break;
+            }
+
+            Advance();
+        }
+    }
+
+    private bool Check(TokenType type)
+    {
+        return IsAtEnd ? false : Peek().Type == type;
+    }
+
+    private Token Peek()
+    {
+        return tokens[current];
+    }
+
+    private Token Advance()
+    {
+        if (!IsAtEnd)
+        {
+            ++current;
+        }
+        return Previous();
+    }
+
+    private Token Previous()
+    {
+        return tokens[current - 1];
+    }
+
+    private bool IsAtEnd => Peek().Type == TokenType.Eof;
+}
+
+class ParseException : Exception
+{
 }
