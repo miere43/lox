@@ -1,9 +1,22 @@
-﻿class Program
+﻿using System.Text;
+
+class Program
 {
     private static bool hadError = false;
 
     public static int Main(string[] args)
     {
+        var expression = new BinaryExpression(
+            new UnaryExpression(new Token(TokenType.Minus, "-", null, 1), new LiteralExpression(123)),
+            new Token(TokenType.Star, "*", null, 1),
+            new GroupingExpression(new LiteralExpression(45.67)));
+
+        var printer = new AstPrinter();
+        printer.Print(expression);
+
+        return 0;
+
+#if false
         if (args.Length > 1)
         {
             Console.WriteLine("Usage: jlox [script]");
@@ -17,6 +30,7 @@
         {
             return RunPrompt();
         }
+#endif
     }
 
     private static int RunFile(string path)
@@ -342,5 +356,90 @@ class Scanner
     private static bool IsAlphaNumeric(char c)
     {
         return IsDigit(c) || IsAlpha(c);
+    }
+}
+
+abstract class Expression
+{
+}
+
+class BinaryExpression : Expression
+{
+    public readonly Expression Left;
+    public readonly Token Operator;
+    public readonly Expression Right;
+
+    public BinaryExpression(Expression left, Token @operator, Expression right)
+    {
+        Left = left;
+        Operator = @operator;
+        Right = right;
+    }
+}
+
+class UnaryExpression : Expression
+{
+    public readonly Token Operator;
+    public readonly Expression Right;
+
+    public UnaryExpression(Token @operator, Expression right)
+    {
+        Operator = @operator;
+        Right = right;
+    }
+}
+
+class LiteralExpression : Expression
+{
+    public readonly object? Value;
+
+    public LiteralExpression(object? value)
+    {
+        Value = value;
+    }
+}
+
+class GroupingExpression : Expression
+{
+    public readonly Expression Expression;
+
+    public GroupingExpression(Expression expression)
+    {
+        Expression = expression;
+    }
+}
+
+class AstPrinter
+{
+    public void Print(Expression expression)
+    {
+        Console.WriteLine(ExpressionToString(expression));
+    }
+
+    private string Parenthesize(string name, params Expression[] expressions)
+    {
+        var builder = new StringBuilder();
+
+        builder.Append('(').Append(name);
+        foreach (var expression in expressions)
+        {
+            builder.Append(' ');
+            builder.Append(ExpressionToString(expression));
+        }
+        builder.Append(')');
+
+        return builder.ToString();
+    }
+
+    private string ExpressionToString(Expression expression)
+    {
+        return expression switch
+        {
+            LiteralExpression literal => literal.Value?.ToString() ?? "nil",
+            BinaryExpression binary => Parenthesize(binary.Operator.Lexeme, binary.Left, binary.Right),
+            UnaryExpression unary => Parenthesize(unary.Operator.Lexeme, unary.Right),
+            GroupingExpression grouping => Parenthesize("group", grouping.Expression),
+            _ => throw new NotImplementedException(),
+        };
     }
 }
