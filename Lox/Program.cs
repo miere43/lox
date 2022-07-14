@@ -2,7 +2,10 @@
 
 class Program
 {
+    private static Interpreter interpreter = new();
+
     private static bool hadError = false;
+    private static bool hadRuntimeError = false;
 
     public static int Main(string[] args)
     {
@@ -24,7 +27,15 @@ class Program
     private static int RunFile(string path)
     {
         Run(File.ReadAllText(path));
-        return hadError ? 65 : 0;
+        if (hadError)
+        {
+            return 65;
+        }
+        else if (hadRuntimeError)
+        {
+            return 70;
+        }
+        return 0;
     }
 
     private static int RunPrompt()
@@ -59,8 +70,7 @@ class Program
             return;
         }
 
-        var printer = new AstPrinter();
-        printer.Print(expression);
+        interpreter.Interpret(expression);
     }
 
     public static void Error(int line, string message)
@@ -78,6 +88,12 @@ class Program
         {
             Report(token.Line, $"at '{token.Lexeme}'", message);
         }
+    }
+
+    public static void RuntimeError(RuntimeException exception)
+    {
+        Console.WriteLine($"{exception.Message}\n[line {exception.Token.Line}]");
+        hadRuntimeError = true;
     }
 
     public static void Report(int line, string where, string message)
@@ -312,7 +328,7 @@ class Scanner
         Advance();
 
         // Trim the surrounding quotes.
-        var value = source.Substring(start + 1, current - 1);
+        var value = source.Substring(start + 1, (current - start) - 2);
         AddToken(TokenType.String, value);
     }
 
@@ -332,7 +348,7 @@ class Scanner
             }
         }
 
-        AddToken(TokenType.Number, source.Substring(start, current - start));
+        AddToken(TokenType.Number, double.Parse(source.Substring(start, current - start)));
     }
 
     private void Identifier()
@@ -365,6 +381,7 @@ class Scanner
 
 abstract class Expression
 {
+    public abstract object? Evaluate();
 }
 
 class BinaryExpression : Expression
@@ -379,6 +396,99 @@ class BinaryExpression : Expression
         Operator = @operator;
         Right = right;
     }
+
+    public override object? Evaluate()
+    {
+        var rawLeft = Left.Evaluate();
+        var rawRight = Right.Evaluate();
+
+        switch (Operator.Type)
+        {
+            case TokenType.Greater:
+            {
+                var (left, right) = ExpectNumbers(Operator, rawLeft, rawRight);
+                return left > right;
+            }
+
+            case TokenType.GreaterEqual:
+            {
+                var (left, right) = ExpectNumbers(Operator, rawLeft, rawRight);
+                return left >= right;
+            }
+
+            case TokenType.Less:
+            {
+                var (left, right) = ExpectNumbers(Operator, rawLeft, rawRight);
+                return left < right;
+            }
+
+            case TokenType.LessEqual:
+            {
+                var (left, right) = ExpectNumbers(Operator, rawLeft, rawRight);
+                return left <= right;
+            }
+
+            case TokenType.Minus:
+            {
+                var (left, right) = ExpectNumbers(Operator, rawLeft, rawRight);
+                return left - right;
+            }
+
+            case TokenType.Plus:
+                if (rawLeft is double numberLeft && rawRight is double numberRight)
+                {
+                    return numberLeft + numberRight;
+                }
+                else if (rawLeft is string stringLeft && rawRight is string stringRight)
+                {
+                    return stringLeft + stringRight;
+                }
+                throw new RuntimeException(Operator, "Operands must be two numbers or two strings.");
+
+            case TokenType.Slash:
+            {
+                var (left, right) = ExpectNumbers(Operator, rawLeft, rawRight);
+                return left / right;
+            }
+            
+            case TokenType.Star:
+            {
+                var (left, right) = ExpectNumbers(Operator, rawLeft, rawRight);
+                return left * right;
+            }
+            
+            case TokenType.BangEqual:
+                return !IsEqual(rawLeft, rawRight);
+
+            case TokenType:
+                return IsEqual(rawLeft, rawRight);
+            
+            default:
+                throw new NotImplementedException();
+        }
+    }
+
+    private static bool IsEqual(object? left, object? right)
+    {
+        if (left == null && right == null)
+        {
+            return true;
+        }
+        else if (left == null)
+        {
+            return false;
+        }
+        return left.Equals(right);
+    }
+
+    private static (double Left, double Right) ExpectNumbers(Token op, object? left, object? right)
+    {
+        if (left is double numberLeft && right is double numberRight)
+        {
+            return (numberLeft, numberRight);
+        }
+        throw new RuntimeException(op, $"Operands must be numbers.");
+    }
 }
 
 class UnaryExpression : Expression
@@ -391,6 +501,35 @@ class UnaryExpression : Expression
         Operator = @operator;
         Right = right;
     }
+
+    public override object? Evaluate()
+    {
+        var right = Right.Evaluate();
+
+        switch (Operator.Type)
+        {
+            case TokenType.Bang:
+                if (right == null)
+                {
+                    return false;
+                }
+                else if (right is bool boolean)
+                {
+                    return boolean;
+                }
+                return false;
+
+            case TokenType.Minus:
+                if (right is double number)
+                {
+                    return -number;
+                }
+                throw new RuntimeException(Operator, $"Operand must be a number.");
+            
+            default:
+                throw new NotImplementedException();
+        }
+    }
 }
 
 class LiteralExpression : Expression
@@ -401,6 +540,11 @@ class LiteralExpression : Expression
     {
         Value = value;
     }
+
+    public override object? Evaluate()
+    {
+        return Value;
+    }
 }
 
 class GroupingExpression : Expression
@@ -410,6 +554,11 @@ class GroupingExpression : Expression
     public GroupingExpression(Expression expression)
     {
         Expression = expression;
+    }
+
+    public override object? Evaluate()
+    {
+        return Expression.Evaluate();
     }
 }
 
@@ -660,4 +809,35 @@ class Parser
 
 class ParseException : Exception
 {
+}
+
+class RuntimeException : Exception
+{
+    public readonly Token Token;
+
+    public RuntimeException(Token token, string? message) : base(message)
+    {
+        Token = token;
+    }
+}
+
+class Interpreter
+{
+    public void Interpret(Expression expression)
+    {
+        try
+        {
+            var value = expression.Evaluate();
+            Console.WriteLine(Stringify(value));
+        }
+        catch (RuntimeException exception)
+        {
+            Program.RuntimeError(exception);
+        }
+    }
+
+    private string Stringify(object? value)
+    {
+        return value?.ToString() ?? "nil";
+    }
 }
