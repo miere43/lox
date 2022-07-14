@@ -2,7 +2,7 @@
 
 class Program
 {
-    private static Interpreter interpreter = new();
+    private static readonly Interpreter interpreter = new();
 
     private static bool hadError = false;
     private static bool hadRuntimeError = false;
@@ -282,7 +282,7 @@ class Scanner
 
     private void AddToken(TokenType type, object? literal)
     {
-        var text = source.Substring(start, current - start);
+        var text = source[start..current];
         tokens.Add(new Token(type, text, literal, line));
     }
 
@@ -348,7 +348,7 @@ class Scanner
             }
         }
 
-        AddToken(TokenType.Number, double.Parse(source.Substring(start, current - start)));
+        AddToken(TokenType.Number, double.Parse(source[start..current]));
     }
 
     private void Identifier()
@@ -358,7 +358,7 @@ class Scanner
             Advance();
         }
 
-        var text = source.Substring(start, current - start);
+        var text = source[start..current];
         var type = Keywords.GetValueOrDefault(text, TokenType.Identifier);
         AddToken(type);
     }
@@ -381,7 +381,61 @@ class Scanner
 
 abstract class Expression
 {
-    public abstract object? Evaluate();
+    public abstract object? Evaluate(Interpreter intepreter);
+}
+
+abstract class Statement
+{
+    public abstract void Execute(Interpreter interpreter);
+}
+
+class PrintStatement : Statement
+{
+    public readonly Expression Expression;
+
+    public PrintStatement(Expression expression)
+    {
+        Expression = expression;
+    }
+
+    public override void Execute(Interpreter intepreter)
+    {
+        var value = Expression.Evaluate(intepreter);
+        Console.WriteLine(Interpreter.Stringify(value));
+    }
+}
+
+class ExpressionStatement : Statement
+{
+    public readonly Expression Expression;
+
+    public ExpressionStatement(Expression expression)
+    {
+        Expression = expression;
+    }
+
+    public override void Execute(Interpreter interpreter)
+    {
+        Expression.Evaluate(interpreter);
+    }
+}
+
+class VariableDeclaration : Statement
+{
+    public readonly Token Name;
+    public readonly Expression? Initializer;
+
+    public VariableDeclaration(Token name, Expression? initializer)
+    {
+        Name = name;
+        Initializer = initializer;
+    }
+
+    public override void Execute(Interpreter interpreter)
+    {
+        var value = Initializer?.Evaluate(interpreter);
+        interpreter.Environment.Define(Name.Lexeme, value);
+    }
 }
 
 class BinaryExpression : Expression
@@ -397,10 +451,10 @@ class BinaryExpression : Expression
         Right = right;
     }
 
-    public override object? Evaluate()
+    public override object? Evaluate(Interpreter interpreter)
     {
-        var rawLeft = Left.Evaluate();
-        var rawRight = Right.Evaluate();
+        var rawLeft = Left.Evaluate(interpreter);
+        var rawRight = Right.Evaluate(interpreter);
 
         switch (Operator.Type)
         {
@@ -502,9 +556,9 @@ class UnaryExpression : Expression
         Right = right;
     }
 
-    public override object? Evaluate()
+    public override object? Evaluate(Interpreter interpreter)
     {
-        var right = Right.Evaluate();
+        var right = Right.Evaluate(interpreter);
 
         switch (Operator.Type)
         {
@@ -541,7 +595,7 @@ class LiteralExpression : Expression
         Value = value;
     }
 
-    public override object? Evaluate()
+    public override object? Evaluate(Interpreter interpreter)
     {
         return Value;
     }
@@ -556,9 +610,71 @@ class GroupingExpression : Expression
         Expression = expression;
     }
 
-    public override object? Evaluate()
+    public override object? Evaluate(Interpreter interpreter)
     {
-        return Expression.Evaluate();
+        return Expression.Evaluate(interpreter);
+    }
+}
+
+class VariableExpression : Expression
+{
+    public readonly Token Name;
+
+    public VariableExpression(Token name)
+    {
+        Name = name;
+    }
+
+    public override object? Evaluate(Interpreter interpreter)
+    {
+        return interpreter.Environment.Get(Name);
+    }
+}
+
+class AssignmentExpression : Expression
+{
+    public readonly Token Token;
+    public readonly Expression Value;
+
+    public AssignmentExpression(Token token, Expression value)
+    {
+        Token = token;
+        Value = value;
+    }
+
+    public override object? Evaluate(Interpreter interpreter)
+    {
+        var value = Value.Evaluate(interpreter);
+        interpreter.Environment.Assign(Token, value);
+        return value;
+    }
+}
+
+class Environment
+{
+    private readonly Dictionary<string, object?> values = new();
+
+    public void Define(string name, object? value)
+    {
+        values[name] = value;
+    }
+
+    public object? Get(Token name)
+    {
+        if (values.TryGetValue(name.Lexeme, out var value))
+        {
+            return value;
+        }
+        throw new RuntimeException(name, $"Undefined variable '{name.Lexeme}'.");
+    }
+
+    public void Assign(Token token, object? value)
+    {
+        if (!values.ContainsKey(token.Lexeme))
+        {
+            throw new RuntimeException(token, $"Undefined variable '{token.Lexeme}'.");
+        }
+        values[token.Lexeme] = value;
     }
 }
 
@@ -607,21 +723,105 @@ class Parser
         this.tokens = tokens;
     }
 
-    public Expression? Parse()
+    public List<Statement> Parse()
     {
         try
         {
-            return Expression();
+            var statements = new List<Statement>();
+            while (!IsAtEnd)
+            {
+                var declaration = Declaration();
+                if (declaration != null)
+                {
+                    statements.Add(declaration);
+                }
+            }
+            return statements;
         }
         catch (ParseException)
         {
+            return new List<Statement>();
+        }
+    }
+
+    private Statement? Declaration()
+    {
+        try
+        {
+            if (Match(TokenType.Var))
+            {
+                return VariableDeclaration();
+            }
+            return Statement();
+        }
+        catch (ParseException)
+        {
+            Synchronize();
             return null;
         }
+    }
+
+    private Statement VariableDeclaration()
+    {
+        var name = Consume(TokenType.Identifier, "Expect variable name.");
+
+        Expression? initializer = null;
+        if (Match(TokenType.Equal))
+        {
+            initializer = Expression();
+        }
+
+        Consume(TokenType.Semicolon, "Expect ';' after variable declaration.");
+        return new VariableDeclaration(name, initializer);
+    }
+
+    private Statement Statement()
+    {
+        if (Match(TokenType.Print))
+        {
+            return PrintStatement();
+        }
+        return ExpressionStatement();
+    }
+
+    private Statement ExpressionStatement()
+    {
+        var value = Assignment();
+        Consume(TokenType.Semicolon, "Expect ';' after value.");
+        return new ExpressionStatement(value);
+    }
+
+    private Statement PrintStatement()
+    {
+        var value = Expression();
+        Consume(TokenType.Semicolon, "Expect ';' after value.");
+        return new PrintStatement(value);
     }
 
     private Expression Expression()
     {
         return Equality();
+    }
+
+    private Expression Assignment()
+    {
+        var expression = Equality();
+
+        if (Match(TokenType.Equal))
+        {
+            var equals = Previous();
+            var value = Assignment();
+
+            if (expression is VariableExpression variableExpression)
+            {
+                var name = variableExpression.Name;
+                return new AssignmentExpression(name, value);
+            }
+
+            Error(equals, "Invalid assignment target.");
+        }
+
+        return expression;
     }
 
     private Expression Equality()
@@ -706,13 +906,15 @@ class Parser
         {
             return new LiteralExpression(null);
         }
-
-        if (Match(TokenType.Number, TokenType.String))
+        else if (Match(TokenType.Number, TokenType.String))
         {
             return new LiteralExpression(Previous().Literal);
         }
-
-        if (Match(TokenType.LeftParen))
+        else if (Match(TokenType.Identifier))
+        {
+            return new VariableExpression(Previous());
+        }
+        else if (Match(TokenType.LeftParen))
         {
             var expression = Expression();
             Consume(TokenType.RightParen, "Expected ')' after expression.");
@@ -746,7 +948,7 @@ class Parser
         throw Error(Peek(), message);
     }
 
-    private ParseException Error(Token token, string message)
+    private static ParseException Error(Token token, string message)
     {
         Program.Error(token, message);
         return new ParseException();
@@ -782,7 +984,11 @@ class Parser
 
     private bool Check(TokenType type)
     {
-        return IsAtEnd ? false : Peek().Type == type;
+        if (IsAtEnd)
+        {
+            return false;
+        }
+        return Peek().Type == type;
     }
 
     private Token Peek()
@@ -823,12 +1029,16 @@ class RuntimeException : Exception
 
 class Interpreter
 {
-    public void Interpret(Expression expression)
+    public readonly Environment Environment = new();
+
+    public void Interpret(List<Statement> statements)
     {
         try
         {
-            var value = expression.Evaluate();
-            Console.WriteLine(Stringify(value));
+            foreach (var statement in statements)
+            {
+                statement.Execute(this);
+            }
         }
         catch (RuntimeException exception)
         {
@@ -836,7 +1046,7 @@ class Interpreter
         }
     }
 
-    private string Stringify(object? value)
+    public static string Stringify(object? value)
     {
         return value?.ToString() ?? "nil";
     }
