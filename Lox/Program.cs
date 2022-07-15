@@ -389,6 +389,26 @@ abstract class Statement
     public abstract void Execute(Interpreter interpreter);
 }
 
+class WhileStatement : Statement
+{
+    public readonly Expression Condition;
+    public readonly Statement Body;
+
+    public WhileStatement(Expression condition, Statement body)
+    {
+        Condition = condition;
+        Body = body;
+    }
+
+    public override void Execute(Interpreter interpreter)
+    {
+        while (Interpreter.IsTruthy(Condition.Evaluate(interpreter)))
+        {
+            Body.Execute(interpreter);
+        }
+    }
+}
+
 class BlockStatement : Statement
 {
     public readonly List<Statement> Statements;
@@ -414,6 +434,33 @@ class BlockStatement : Statement
         finally
         {
             interpreter.Environment = previous;
+        }
+    }
+}
+
+class IfStatement : Statement
+{
+    public readonly Expression Condition;
+    public readonly Statement ThenBranch;
+    public readonly Statement? ElseBranch;
+
+    public IfStatement(Expression condition, Statement thenBranch, Statement? elseBranch)
+    {
+        Condition = condition;
+        ThenBranch = thenBranch;
+        ElseBranch = elseBranch;
+    }
+
+    public override void Execute(Interpreter interpreter)
+    {
+        var value = Condition.Evaluate(interpreter);
+        if (Interpreter.IsTruthy(value))
+        {
+            ThenBranch.Execute(interpreter);
+        }
+        else if (ElseBranch != null)
+        {
+            ElseBranch.Execute(interpreter);
         }
     }
 }
@@ -679,6 +726,44 @@ class AssignmentExpression : Expression
     }
 }
 
+class LogicalExpression : Expression
+{
+    public readonly Expression Left;
+    public readonly Token Operator;
+    public readonly Expression Right;
+
+    public LogicalExpression(Expression left, Token op, Expression right)
+    {
+        Left = left;
+        Operator = op;
+        Right = right;
+    }
+
+    public override object? Evaluate(Interpreter interpreter)
+    {
+        var left = Left.Evaluate(interpreter);
+
+        switch (Operator.Type)
+        {
+            case TokenType.Or:
+                if (Interpreter.IsTruthy(left))
+                {
+                    return left;
+                }
+                break;
+
+            case TokenType.And:
+                if (!Interpreter.IsTruthy(left))
+                {
+                    return left;
+                }
+                break;
+        }
+
+        return Right.Evaluate(interpreter);
+    }
+}
+
 class Environment
 {
     private readonly Dictionary<string, object?> values = new();
@@ -713,11 +798,14 @@ class Environment
     {
         if (!values.ContainsKey(token.Lexeme))
         {
-            throw new RuntimeException(token, $"Undefined variable '{token.Lexeme}'.");
-        }
-        else if (Enclosing != null)
-        {
-            Enclosing.Assign(token, value);
+            if (Enclosing != null)
+            {
+                Enclosing.Assign(token, value);
+            }
+            else
+            {
+               throw new RuntimeException(token, $"Undefined variable '{token.Lexeme}'.");
+            }
         }
         else
         {
@@ -823,9 +911,85 @@ class Parser
         return new VariableDeclaration(name, initializer);
     }
 
+    private Statement WhileStatement()
+    {
+        Consume(TokenType.LeftParen, "Expect '(' after 'while'.");
+        var condition = Expression();
+        Consume(TokenType.RightParen, "Expect ')' after condition.");
+        var body = Statement();
+
+        return new WhileStatement(condition, body);
+    }
+
+    private Statement ForStatement()
+    {
+        Consume(TokenType.LeftParen, "Expect '(' after 'for'.");
+
+        Statement? initializer;
+        if (Match(TokenType.Semicolon))
+        {
+            initializer = null;
+        }
+        else if (Match(TokenType.Var))
+        {
+            initializer = VariableDeclaration();
+        }
+        else
+        {
+            initializer = ExpressionStatement();
+        }
+
+        var condition = Check(TokenType.Semicolon) ? null : Expression();
+        Consume(TokenType.Semicolon, "Expect ';' after loop condition.");
+
+        var increment = Check(TokenType.RightParen) ? null : Expression();
+        Consume(TokenType.RightParen, "Expect ')' after for clauses.");
+
+        var body = Statement();
+
+        if (increment != null)
+        {
+            body = new BlockStatement(new()
+            {
+                body,
+                new ExpressionStatement(increment)
+            });
+        }
+
+        if (condition == null)
+        {
+            condition = new LiteralExpression(true);
+        }
+
+        body = new WhileStatement(condition, body);
+
+        if (initializer != null)
+        {
+            body = new BlockStatement(new()
+            {
+                initializer,
+                body,
+            });
+        }
+
+        return body;
+    }
+
     private Statement Statement()
     {
-        if (Match(TokenType.Print))
+        if (Match(TokenType.For))
+        {
+            return ForStatement();
+        }
+        else if (Match(TokenType.If))
+        {
+            return IfStatement();
+        }
+        else if (Match(TokenType.While))
+        {
+            return WhileStatement();
+        }
+        else if (Match(TokenType.Print))
         {
             return PrintStatement();
         }
@@ -841,6 +1005,18 @@ class Parser
         var value = Assignment();
         Consume(TokenType.Semicolon, "Expect ';' after value.");
         return new ExpressionStatement(value);
+    }
+
+    private Statement IfStatement()
+    {
+        Consume(TokenType.LeftParen, "Expect '(' after 'if'.");
+        var condition = Expression();
+        Consume(TokenType.RightParen, "Expect ')' after 'if'.");
+
+        var thenBranch = Statement();
+        var elseBranch = Match(TokenType.Else) ? Statement() : null;
+
+        return new IfStatement(condition, thenBranch, elseBranch);
     }
 
     private Statement PrintStatement()
@@ -869,12 +1045,40 @@ class Parser
 
     private Expression Expression()
     {
-        return Equality();
+        return Assignment();
+    }
+
+    private Expression And()
+    {
+        var expression = Equality();
+
+        while (Match(TokenType.And))
+        {
+            var op = Previous();
+            var right = Equality();
+            expression = new LogicalExpression(expression, op, right);
+        }
+
+        return expression;
+    }
+
+    private Expression Or()
+    {
+        var expression = And();
+
+        while (Match(TokenType.Or))
+        {
+            var op = Previous();
+            var right = And();
+            expression = new LogicalExpression(expression, op, right);
+        }
+
+        return expression;
     }
 
     private Expression Assignment()
     {
-        var expression = Equality();
+        var expression = Or();
 
         if (Match(TokenType.Equal))
         {
@@ -1118,5 +1322,15 @@ class Interpreter
     public static string Stringify(object? value)
     {
         return value?.ToString() ?? "nil";
+    }
+
+    public static bool IsTruthy(object? value)
+    {
+        return value switch
+        {
+            bool boolValue => boolValue,
+            string stringValue => stringValue.Length > 0,
+            _ => false,
+        };
     }
 }
