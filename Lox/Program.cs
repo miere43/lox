@@ -389,6 +389,35 @@ abstract class Statement
     public abstract void Execute(Interpreter interpreter);
 }
 
+class BlockStatement : Statement
+{
+    public readonly List<Statement> Statements;
+
+    public BlockStatement(List<Statement> statements)
+    {
+        Statements = statements;
+    }
+
+    public override void Execute(Interpreter interpreter)
+    {
+        var previous = interpreter.Environment;
+        var environment = new Environment(previous);
+        try
+        {
+            interpreter.Environment = environment;
+
+            foreach (var statement in Statements)
+            {
+                statement.Execute(interpreter);
+            }
+        }
+        finally
+        {
+            interpreter.Environment = previous;
+        }
+    }
+}
+
 class PrintStatement : Statement
 {
     public readonly Expression Expression;
@@ -654,6 +683,13 @@ class Environment
 {
     private readonly Dictionary<string, object?> values = new();
 
+    public readonly Environment? Enclosing;
+
+    public Environment(Environment? enclosing = null)
+    {
+        Enclosing = enclosing;
+    }
+
     public void Define(string name, object? value)
     {
         values[name] = value;
@@ -665,6 +701,11 @@ class Environment
         {
             return value;
         }
+        else if (Enclosing != null)
+        {
+            return Enclosing.Get(name);
+        }
+
         throw new RuntimeException(name, $"Undefined variable '{name.Lexeme}'.");
     }
 
@@ -674,7 +715,14 @@ class Environment
         {
             throw new RuntimeException(token, $"Undefined variable '{token.Lexeme}'.");
         }
-        values[token.Lexeme] = value;
+        else if (Enclosing != null)
+        {
+            Enclosing.Assign(token, value);
+        }
+        else
+        {
+            values[token.Lexeme] = value;
+        }
     }
 }
 
@@ -781,6 +829,10 @@ class Parser
         {
             return PrintStatement();
         }
+        else if (Match(TokenType.LeftBrace))
+        {
+            return new BlockStatement(BlockStatement());
+        }
         return ExpressionStatement();
     }
 
@@ -796,6 +848,23 @@ class Parser
         var value = Expression();
         Consume(TokenType.Semicolon, "Expect ';' after value.");
         return new PrintStatement(value);
+    }
+
+    private List<Statement> BlockStatement()
+    {
+        var statements = new List<Statement>();
+
+        while (!Check(TokenType.RightBrace) && !IsAtEnd)
+        {
+            var declaration = Declaration();
+            if (declaration != null)
+            {
+                statements.Add(declaration);
+            }
+        }
+
+        Consume(TokenType.RightBrace, "Expect '}' after block.");
+        return statements;
     }
 
     private Expression Expression()
@@ -1029,7 +1098,7 @@ class RuntimeException : Exception
 
 class Interpreter
 {
-    public readonly Environment Environment = new();
+    public Environment Environment = new();
 
     public void Interpret(List<Statement> statements)
     {
