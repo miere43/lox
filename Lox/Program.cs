@@ -218,11 +218,11 @@ class Scanner
                 break;
 
             case '<':
-                AddToken(Match('<') ? TokenType.LessEqual : TokenType.Less);
+                AddToken(Match('=') ? TokenType.LessEqual : TokenType.Less);
                 break;
 
             case '>':
-                AddToken(Match('>') ? TokenType.GreaterEqual : TokenType.Greater);
+                AddToken(Match('=') ? TokenType.GreaterEqual : TokenType.Greater);
                 break;
 
             case '/':
@@ -381,7 +381,7 @@ class Scanner
 
 abstract class Expression
 {
-    public abstract object? Evaluate(Interpreter intepreter);
+    public abstract object? Evaluate(Interpreter interpreter);
 }
 
 abstract class Statement
@@ -420,21 +420,8 @@ class BlockStatement : Statement
 
     public override void Execute(Interpreter interpreter)
     {
-        var previous = interpreter.Environment;
-        var environment = new Environment(previous);
-        try
-        {
-            interpreter.Environment = environment;
-
-            foreach (var statement in Statements)
-            {
-                statement.Execute(interpreter);
-            }
-        }
-        finally
-        {
-            interpreter.Environment = previous;
-        }
+        var environment = new Environment(interpreter.Environment);
+        interpreter.ExecuteBlock(Statements, environment);
     }
 }
 
@@ -474,9 +461,9 @@ class PrintStatement : Statement
         Expression = expression;
     }
 
-    public override void Execute(Interpreter intepreter)
+    public override void Execute(Interpreter interpreter)
     {
-        var value = Expression.Evaluate(intepreter);
+        var value = Expression.Evaluate(interpreter);
         Console.WriteLine(Interpreter.Stringify(value));
     }
 }
@@ -764,6 +751,45 @@ class LogicalExpression : Expression
     }
 }
 
+class CallExpression : Expression
+{
+    public readonly Expression Callee;
+    public readonly Token Paren;
+    public readonly List<Expression> Arguments;
+
+    public CallExpression(Expression callee, Token paren, List<Expression> arguments)
+    {
+        Callee = callee;
+        Paren = paren;
+        Arguments = arguments;
+    }
+
+    public override object? Evaluate(Interpreter interpreter)
+    {
+        var callee = Callee.Evaluate(interpreter);
+
+        var arguments = new List<object?>();
+        foreach (var argument in Arguments)
+        {
+            arguments.Add(argument.Evaluate(interpreter));
+        }
+
+        if (callee is Callable function)
+        {
+            if (function.Arity != arguments.Count)
+            {
+                throw new RuntimeException(Paren, $"Expected {function.Arity} arguments but got {arguments.Count}.");
+            }
+
+            return function.Call(interpreter, arguments);
+        }
+        else
+        {
+            throw new RuntimeException(Paren, "Can only call functions and classes.");
+        }
+    }
+}
+
 class Environment
 {
     private readonly Dictionary<string, object?> values = new();
@@ -884,7 +910,11 @@ class Parser
     {
         try
         {
-            if (Match(TokenType.Var))
+            if (Match(TokenType.Fun))
+            {
+                return FunctionDeclaration("function");
+            }
+            else if (Match(TokenType.Var))
             {
                 return VariableDeclaration();
             }
@@ -895,6 +925,32 @@ class Parser
             Synchronize();
             return null;
         }
+    }
+
+    private Statement FunctionDeclaration(string kind)
+    {
+        var name = Consume(TokenType.Identifier, $"Expected {kind} name.");
+        Consume(TokenType.LeftParen, $"Expect '(' after {kind} name.");
+
+        var parameters = new List<Token>();
+        if (!Check(TokenType.RightParen))
+        {
+            do
+            {
+                if (parameters.Count >= 255)
+                {
+                    Error(Peek(), "Can't have more than 255 parameters.");
+                }
+
+                parameters.Add(Consume(TokenType.Identifier, "Expect parameter name."));
+            }
+            while (Match(TokenType.Comma));
+        }
+        Consume(TokenType.RightParen, "Expect '(' after parameters.");
+
+        Consume(TokenType.LeftBrace, $"Expect '{{' before {kind} body.");
+        var body = BlockStatement();
+        return new FunctionDeclaration(name, parameters, body);
     }
 
     private Statement VariableDeclaration()
@@ -993,6 +1049,10 @@ class Parser
         {
             return PrintStatement();
         }
+        else if (Match(TokenType.Return))
+        {
+            return ReturnStatement();
+        }
         else if (Match(TokenType.LeftBrace))
         {
             return new BlockStatement(BlockStatement());
@@ -1017,6 +1077,14 @@ class Parser
         var elseBranch = Match(TokenType.Else) ? Statement() : null;
 
         return new IfStatement(condition, thenBranch, elseBranch);
+    }
+
+    private Statement ReturnStatement()
+    {
+        var keyword = Previous();
+        var value = Check(TokenType.Semicolon) ? null : Expression();
+        Consume(TokenType.Semicolon, "Expect ';' after return value.");
+        return new ReturnStatement(keyword, value);
     }
 
     private Statement PrintStatement()
@@ -1162,7 +1230,47 @@ class Parser
             return new UnaryExpression(op, right);
         }
 
-        return Primary();
+        return Call();
+    }
+
+    private Expression Call()
+    {
+        var expression = Primary();
+
+        while (true)
+        {
+            if (Match(TokenType.LeftParen))
+            {
+                expression = FinishCall(expression);
+            }
+            else
+            {
+                break;
+            }
+        }
+
+        return expression;
+    }
+
+    private Expression FinishCall(Expression callee)
+    {
+        var arguments = new List<Expression>();
+        if (!Check(TokenType.RightParen))
+        {
+            do
+            {
+                if (arguments.Count >= 255)
+                {
+                    Error(Peek(), "Can't have more than 255 arguments.");
+                }
+                arguments.Add(Expression());
+            }
+            while (Match(TokenType.Comma));
+        }
+
+        var paren = Consume(TokenType.RightParen, "Expect ')' after arguments.");
+
+        return new CallExpression(callee, paren, arguments);
     }
 
     private Expression Primary()
@@ -1286,6 +1394,53 @@ class Parser
     private bool IsAtEnd => Peek().Type == TokenType.Eof;
 }
 
+class ReturnStatement : Statement
+{
+    public readonly Token Keyword;
+    public readonly Expression? Value;
+
+    public ReturnStatement(Token keyword, Expression? value)
+    {
+        Keyword = keyword;
+        Value = value;
+    }
+
+    public override void Execute(Interpreter interpreter)
+    {
+        throw new ReturnException(Value?.Evaluate(interpreter));
+    }
+}
+
+internal class ReturnException : Exception
+{
+    public readonly object? Value;
+
+    public ReturnException(object? value)
+    {
+        Value = value;
+    }
+}
+
+class FunctionDeclaration : Statement
+{
+    public readonly Token Name;
+    public readonly List<Token> Parameters;
+    public readonly List<Statement> Body;
+
+    public FunctionDeclaration(Token name, List<Token> parameters, List<Statement> body)
+    {
+        Name = name;
+        Parameters = parameters;
+        Body = body;
+    }
+
+    public override void Execute(Interpreter interpreter)
+    {
+        var function = new RuntimeFunction(this, interpreter.Environment);
+        interpreter.Environment.Define(Name.Lexeme, function);
+    }
+}
+
 class ParseException : Exception
 {
 }
@@ -1302,7 +1457,18 @@ class RuntimeException : Exception
 
 class Interpreter
 {
-    public Environment Environment = new();
+    public Environment Globals = new();
+    public Environment Environment;
+
+    public Interpreter()
+    {
+        Environment = Globals;
+
+        Globals.Define("clock", new FuncCallable((interpreter, arguments) =>
+        {
+            return new TimeSpan(DateTime.UtcNow.Ticks).TotalSeconds;
+        }, 0));
+    }
 
     public void Interpret(List<Statement> statements)
     {
@@ -1319,6 +1485,24 @@ class Interpreter
         }
     }
 
+    public void ExecuteBlock(List<Statement> statements, Environment environment)
+    {
+        var previous = Environment;
+        try
+        {
+            Environment = environment;
+
+            foreach (var statement in statements)
+            {
+                statement.Execute(this);
+            }
+        }
+        finally
+        {
+            Environment = previous;
+        }
+    }
+
     public static string Stringify(object? value)
     {
         return value?.ToString() ?? "nil";
@@ -1332,5 +1516,74 @@ class Interpreter
             string stringValue => stringValue.Length > 0,
             _ => false,
         };
+    }
+}
+
+abstract class Callable
+{
+    public abstract int Arity { get; }
+
+    public abstract object? Call(Interpreter interpreter, List<object?> arguments);
+}
+
+class FuncCallable : Callable
+{
+    private readonly Func<Interpreter, List<object?>, object?> callable;
+    private readonly int arity;
+
+    public override int Arity => arity;
+
+    public FuncCallable(Func<Interpreter, List<object?>, object?> callable, int arity)
+    {
+        this.callable = callable;
+        this.arity = arity;
+    }
+
+    public override object? Call(Interpreter interpreter, List<object?> arguments)
+    {
+        return callable(interpreter, arguments);
+    }
+
+    public override string ToString()
+    {
+        return "<native fn>";
+    }
+}
+
+class RuntimeFunction : Callable
+{
+    private readonly FunctionDeclaration declaration;
+    private readonly Environment closure;
+
+    public override int Arity => declaration.Parameters.Count;
+
+    public RuntimeFunction(FunctionDeclaration declaration, Environment closure)
+    {
+        this.declaration = declaration;
+        this.closure = closure;
+    }
+
+    public override object? Call(Interpreter interpreter, List<object?> arguments)
+    {
+        var environment = new Environment(closure);
+        for (int i = 0; i < declaration.Parameters.Count; ++i)
+        {
+            environment.Define(declaration.Parameters[i].Lexeme, arguments[i]);
+        }
+
+        try
+        {
+            interpreter.ExecuteBlock(declaration.Body, environment);
+        }
+        catch (ReturnException exception)
+        {
+            return exception.Value;
+        }
+        return null;
+    }
+
+    public override string ToString()
+    {
+        return $"<fn {declaration.Name.Lexeme}>";
     }
 }
