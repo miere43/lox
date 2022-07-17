@@ -63,14 +63,22 @@ class Program
         var scanner = new Scanner(source);
         var tokens = scanner.ScanTokens();
         var parser = new Parser(tokens);
-        var expression = parser.Parse();
+        var statements = parser.Parse();
 
-        if (hadError || expression == null)
+        if (hadError || statements == null)
         {
             return;
         }
 
-        interpreter.Interpret(expression);
+        var resolver = new Resolver(interpreter);
+        resolver.Resolve(statements);
+
+        if (hadError)
+        {
+            return;
+        }
+
+        interpreter.Interpret(statements);
     }
 
     public static void Error(int line, string message)
@@ -382,11 +390,13 @@ class Scanner
 abstract class Expression
 {
     public abstract object? Evaluate(Interpreter interpreter);
+    public abstract void Resolve(Resolver resolver);
 }
 
 abstract class Statement
 {
     public abstract void Execute(Interpreter interpreter);
+    public abstract void Resolve(Resolver resolver);
 }
 
 class WhileStatement : Statement
@@ -407,6 +417,12 @@ class WhileStatement : Statement
             Body.Execute(interpreter);
         }
     }
+
+    public override void Resolve(Resolver resolver)
+    {
+        Condition.Resolve(resolver);
+        Body.Resolve(resolver);
+    }
 }
 
 class BlockStatement : Statement
@@ -422,6 +438,13 @@ class BlockStatement : Statement
     {
         var environment = new Environment(interpreter.Environment);
         interpreter.ExecuteBlock(Statements, environment);
+    }
+
+    public override void Resolve(Resolver resolver)
+    {
+        resolver.BeginScope();
+        resolver.Resolve(Statements);
+        resolver.EndScope();
     }
 }
 
@@ -450,6 +473,13 @@ class IfStatement : Statement
             ElseBranch.Execute(interpreter);
         }
     }
+
+    public override void Resolve(Resolver resolver)
+    {
+        Condition.Resolve(resolver);
+        ThenBranch.Resolve(resolver);
+        ElseBranch?.Resolve(resolver);
+    }
 }
 
 class PrintStatement : Statement
@@ -466,6 +496,11 @@ class PrintStatement : Statement
         var value = Expression.Evaluate(interpreter);
         Console.WriteLine(Interpreter.Stringify(value));
     }
+
+    public override void Resolve(Resolver resolver)
+    {
+        Expression.Resolve(resolver);
+    }
 }
 
 class ExpressionStatement : Statement
@@ -480,6 +515,11 @@ class ExpressionStatement : Statement
     public override void Execute(Interpreter interpreter)
     {
         Expression.Evaluate(interpreter);
+    }
+
+    public override void Resolve(Resolver resolver)
+    {
+        Expression.Resolve(resolver);
     }
 }
 
@@ -498,6 +538,13 @@ class VariableDeclaration : Statement
     {
         var value = Initializer?.Evaluate(interpreter);
         interpreter.Environment.Define(Name.Lexeme, value);
+    }
+
+    public override void Resolve(Resolver resolver)
+    {
+        resolver.Declare(Name);
+        Initializer?.Resolve(resolver);
+        resolver.Define(Name);
     }
 }
 
@@ -585,6 +632,12 @@ class BinaryExpression : Expression
         }
     }
 
+    public override void Resolve(Resolver resolver)
+    {
+        Left.Resolve(resolver);
+        Right.Resolve(resolver);
+    }
+
     private static bool IsEqual(object? left, object? right)
     {
         if (left == null && right == null)
@@ -647,6 +700,11 @@ class UnaryExpression : Expression
                 throw new NotImplementedException();
         }
     }
+
+    public override void Resolve(Resolver resolver)
+    {
+        Right.Resolve(resolver);
+    }
 }
 
 class LiteralExpression : Expression
@@ -661,6 +719,10 @@ class LiteralExpression : Expression
     public override object? Evaluate(Interpreter interpreter)
     {
         return Value;
+    }
+
+    public override void Resolve(Resolver resolver)
+    {
     }
 }
 
@@ -677,6 +739,11 @@ class GroupingExpression : Expression
     {
         return Expression.Evaluate(interpreter);
     }
+
+    public override void Resolve(Resolver resolver)
+    {
+        Expression.Resolve(resolver);
+    }
 }
 
 class VariableExpression : Expression
@@ -690,7 +757,17 @@ class VariableExpression : Expression
 
     public override object? Evaluate(Interpreter interpreter)
     {
-        return interpreter.Environment.Get(Name);
+        return interpreter.LookupVariable(Name, this);
+    }
+
+    public override void Resolve(Resolver resolver)
+    {
+        if (resolver.Scopes.Count > 0 && resolver.Scopes[^1].TryGetValue(Name.Lexeme, out var value) && value == false)
+        {
+            Program.Error(Name, "Can't read local variable in its own initializer.");
+        }
+
+        resolver.ResolveLocal(this, Name);
     }
 }
 
@@ -708,8 +785,23 @@ class AssignmentExpression : Expression
     public override object? Evaluate(Interpreter interpreter)
     {
         var value = Value.Evaluate(interpreter);
-        interpreter.Environment.Assign(Token, value);
+
+        if (interpreter.Locals.TryGetValue(this, out var depth))
+        {
+            interpreter.Environment.AssignAt(depth, Token, value);
+        }
+        else
+        {
+            interpreter.Globals.Assign(Token, value);
+        }
+
         return value;
+    }
+
+    public override void Resolve(Resolver resolver)
+    {
+        Value.Resolve(resolver);
+        resolver.ResolveLocal(this, Token);
     }
 }
 
@@ -749,6 +841,12 @@ class LogicalExpression : Expression
 
         return Right.Evaluate(interpreter);
     }
+
+    public override void Resolve(Resolver resolver)
+    {
+        Left.Resolve(resolver);
+        Right.Resolve(resolver);
+    }
 }
 
 class CallExpression : Expression
@@ -786,6 +884,16 @@ class CallExpression : Expression
         else
         {
             throw new RuntimeException(Paren, "Can only call functions and classes.");
+        }
+    }
+
+    public override void Resolve(Resolver resolver)
+    {
+        Callee.Resolve(resolver);
+
+        foreach (var argument in Arguments)
+        {
+            argument.Resolve(resolver);
         }
     }
 }
@@ -837,6 +945,30 @@ class Environment
         {
             values[token.Lexeme] = value;
         }
+    }
+
+    public object? GetAt(int depth, string name)
+    {
+        return Ancestor(depth).values[name];
+    }
+
+    private Environment Ancestor(int depth)
+    {
+        var environment = this;
+        for (int i = 0; i < depth; ++i)
+        {
+            environment = environment.Enclosing;
+            if (environment == null)
+            {
+                throw new InvalidOperationException();
+            }
+        }
+        return environment;
+    }
+
+    public void AssignAt(int depth, Token token, object? value)
+    {
+        Ancestor(depth).values[token.Lexeme] = value;
     }
 }
 
@@ -1409,6 +1541,16 @@ class ReturnStatement : Statement
     {
         throw new ReturnException(Value?.Evaluate(interpreter));
     }
+
+    public override void Resolve(Resolver resolver)
+    {
+        if (resolver.CurrentFunction == FunctionType.None)
+        {
+            Program.Error(Keyword, "Can't return from top-level code.");
+        }
+
+        Value?.Resolve(resolver);
+    }
 }
 
 internal class ReturnException : Exception
@@ -1439,6 +1581,13 @@ class FunctionDeclaration : Statement
         var function = new RuntimeFunction(this, interpreter.Environment);
         interpreter.Environment.Define(Name.Lexeme, function);
     }
+
+    public override void Resolve(Resolver resolver)
+    {
+        resolver.Declare(Name);
+        resolver.Define(Name);
+        resolver.ResolveFunction(this, FunctionType.Function);
+    }
 }
 
 class ParseException : Exception
@@ -1459,6 +1608,7 @@ class Interpreter
 {
     public Environment Globals = new();
     public Environment Environment;
+    public Dictionary<Expression, int> Locals = new();
 
     public Interpreter()
     {
@@ -1501,6 +1651,20 @@ class Interpreter
         {
             Environment = previous;
         }
+    }
+
+    public void Resolve(Expression expression, int depth)
+    {
+        Locals[expression] = depth;
+    }
+
+    public object? LookupVariable(Token name, Expression expression)
+    {
+        if (Locals.TryGetValue(expression, out var depth))
+        {
+            return Environment.GetAt(depth, name.Lexeme);
+        }
+        return Globals.Get(name);
     }
 
     public static string Stringify(object? value)
@@ -1586,4 +1750,92 @@ class RuntimeFunction : Callable
     {
         return $"<fn {declaration.Name.Lexeme}>";
     }
+}
+
+class Resolver
+{
+    private readonly Interpreter interpreter;
+    
+    public readonly List<Dictionary<string, bool>> Scopes = new();
+
+    public FunctionType CurrentFunction = FunctionType.None;
+
+    public Resolver(Interpreter interpreter)
+    {
+        this.interpreter = interpreter;
+    }
+
+    public void Resolve(List<Statement> statements)
+    {
+        foreach (var statement in statements)
+        {
+            statement.Resolve(this);
+        }
+    }
+
+    public void BeginScope()
+    {
+        Scopes.Add(new());
+    }
+
+    public void EndScope()
+    {
+        Scopes.RemoveAt(Scopes.Count - 1);
+    }
+
+    public void Declare(Token name)
+    {
+        if (Scopes.Count > 0)
+        {
+            var scope = Scopes[^1];
+            if (scope.ContainsKey(name.Lexeme))
+            {
+                Program.Error(name, "Already a variable with this name in this scope.");
+            }
+
+            Scopes[^1][name.Lexeme] = false;
+        }
+    }
+
+    public void Define(Token name)
+    {
+        if (Scopes.Count > 0)
+        {
+            Scopes[^1][name.Lexeme] = true;
+        }
+    }
+
+    public void ResolveLocal(Expression expression, Token name)
+    {
+        for (int i = Scopes.Count - 1; i >= 0; --i)
+        {
+            if (Scopes[i].ContainsKey(name.Lexeme))
+            {
+                interpreter.Resolve(expression, Scopes.Count - 1 - i);
+            }
+        }
+    }
+
+    public void ResolveFunction(FunctionDeclaration function, FunctionType type)
+    {
+        var enclosingFunction = CurrentFunction;
+        CurrentFunction = type;
+
+        BeginScope();
+        foreach (var token in function.Parameters)
+        {
+            Declare(token);
+            Define(token);
+        }
+        Resolve(function.Body);
+        EndScope();
+
+        CurrentFunction = enclosingFunction;
+    }
+}
+
+enum FunctionType
+{
+    None,
+    Function,
 }
