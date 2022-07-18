@@ -1,4 +1,5 @@
-﻿using System.Text;
+﻿using System.Diagnostics.CodeAnalysis;
+using System.Text;
 
 class Program
 {
@@ -1042,7 +1043,11 @@ class Parser
     {
         try
         {
-            if (Match(TokenType.Fun))
+            if (Match(TokenType.Class))
+            {
+                return ClassDeclaration();
+            }
+            else if (Match(TokenType.Fun))
             {
                 return FunctionDeclaration("function");
             }
@@ -1059,7 +1064,23 @@ class Parser
         }
     }
 
-    private Statement FunctionDeclaration(string kind)
+    private Statement ClassDeclaration()
+    {
+        var name = Consume(TokenType.Identifier, "Expect class name.");
+        Consume(TokenType.LeftBrace, "Expect '{' before class body.");
+
+        var methods = new List<FunctionDeclaration>();
+        while (!Check(TokenType.RightBrace) && !IsAtEnd)
+        {
+            methods.Add(FunctionDeclaration("method"));
+        }
+
+        Consume(TokenType.RightBrace, "Expect '}' after class body.");
+
+        return new ClassDeclaration(name, methods);
+    }
+
+    private FunctionDeclaration FunctionDeclaration(string kind)
     {
         var name = Consume(TokenType.Identifier, $"Expected {kind} name.");
         Consume(TokenType.LeftParen, $"Expect '(' after {kind} name.");
@@ -1290,6 +1311,10 @@ class Parser
                 var name = variableExpression.Name;
                 return new AssignmentExpression(name, value);
             }
+            else if (expression is GetExpression getExpression)
+            {
+                return new SetExpression(getExpression.Object, getExpression.Name, value);
+            }
 
             Error(equals, "Invalid assignment target.");
         }
@@ -1374,6 +1399,11 @@ class Parser
             if (Match(TokenType.LeftParen))
             {
                 expression = FinishCall(expression);
+            }
+            else if (Match(TokenType.Dot))
+            {
+                var name = Consume(TokenType.Identifier, "Expect property name after '.'.");
+                expression = new GetExpression(expression, name);
             }
             else
             {
@@ -1524,6 +1554,167 @@ class Parser
     }
 
     private bool IsAtEnd => Peek().Type == TokenType.Eof;
+}
+
+class SetExpression : Expression
+{
+    public readonly Expression Object;
+    public readonly Token Name;
+    public readonly Expression Value;
+
+    public SetExpression(Expression obj, Token name, Expression value)
+    {
+        Object = obj;
+        Name = name;
+        Value = value;
+    }
+
+    public override object? Evaluate(Interpreter interpreter)
+    {
+        var obj = Object.Evaluate(interpreter);
+        if (obj is not RuntimeClassInstance instance)
+        {
+            throw new RuntimeException(Name, "Only instances have fields.");
+        }
+
+        var value = Value.Evaluate(interpreter);
+        instance.Set(Name, value);
+        return value;
+    }
+
+    public override void Resolve(Resolver resolver)
+    {
+        Value.Resolve(resolver);
+        Object.Resolve(resolver);
+    }
+}
+
+class GetExpression : Expression
+{
+    public readonly Expression Object;
+    public readonly Token Name;
+
+    public GetExpression(Expression obj, Token name)
+    {
+        Object = obj;
+        Name = name;
+    }
+
+    public override void Resolve(Resolver resolver)
+    {
+        Object.Resolve(resolver);
+    }
+
+    public override object? Evaluate(Interpreter interpreter)
+    {
+        var value = Object.Evaluate(interpreter);
+        if (value is not RuntimeClassInstance instance)
+        {
+            throw new RuntimeException(Name, "Only instances have properties.");
+        }
+        return instance.Get(Name);
+    }
+}
+
+class ClassDeclaration : Statement
+{
+    public readonly Token Name;
+    public readonly List<FunctionDeclaration> Methods;
+
+    public ClassDeclaration(Token name, List<FunctionDeclaration> methods)
+    {
+        Name = name;
+        Methods = methods;
+    }
+
+    public override void Execute(Interpreter interpreter)
+    {
+        interpreter.Environment.Define(Name.Lexeme, null);
+
+        var methods = new Dictionary<string, RuntimeFunction>();
+        foreach (var method in Methods)
+        {
+            var function = new RuntimeFunction(method, interpreter.Environment);
+            methods[method.Name.Lexeme] = function;
+        }
+
+        var cls = new RuntimeClass(Name.Lexeme, methods);
+        interpreter.Environment.Assign(Name, cls);
+    }
+
+    public override void Resolve(Resolver resolver)
+    {
+        resolver.Declare(Name);
+        resolver.Define(Name);
+
+        foreach (var method in Methods)
+        {
+            resolver.ResolveFunction(method, FunctionType.Method);
+        }
+    }
+}
+
+class RuntimeClass : Callable
+{
+    public readonly string Name;
+    private readonly Dictionary<string, RuntimeFunction> methods;
+
+    public override int Arity => 0;
+
+    public RuntimeClass(string name, Dictionary<string, RuntimeFunction> methods)
+    {
+        Name = name;
+        this.methods = methods;
+    }
+
+    public override object? Call(Interpreter interpreter, List<object?> arguments)
+    {
+        return new RuntimeClassInstance(this);
+    }
+
+    public override string ToString()
+    {
+        return Name;
+    }
+
+    public bool TryGetMethod(string lexeme, [MaybeNullWhen(false)] out RuntimeFunction method)
+    {
+        return methods.TryGetValue(lexeme, out method);
+    }
+}
+
+class RuntimeClassInstance
+{
+    public readonly RuntimeClass Class;
+    private readonly Dictionary<string, object?> fields = new();
+
+    public RuntimeClassInstance(RuntimeClass cls)
+    {
+        Class = cls;
+    }
+
+    public override string ToString()
+    {
+        return $"{Class} instance";
+    }
+
+    public object? Get(Token name)
+    {
+        if (fields.TryGetValue(name.Lexeme, out var value))
+        {
+            return value;
+        }
+        else if (Class.TryGetMethod(name.Lexeme, out var method))
+        {
+            return method;
+        }
+        throw new RuntimeException(name, $"Undefined property '{name.Lexeme}'.");
+    }
+
+    public void Set(Token name, object? value)
+    {
+        fields[name.Lexeme] = value;
+    }
 }
 
 class ReturnStatement : Statement
@@ -1838,4 +2029,5 @@ enum FunctionType
 {
     None,
     Function,
+    Method,
 }
