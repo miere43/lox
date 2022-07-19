@@ -1453,6 +1453,10 @@ class Parser
         {
             return new LiteralExpression(Previous().Literal);
         }
+        else if (Match(TokenType.This))
+        {
+            return new ThisExpression(Previous());
+        }
         else if (Match(TokenType.Identifier))
         {
             return new VariableExpression(Previous());
@@ -1556,6 +1560,32 @@ class Parser
     private bool IsAtEnd => Peek().Type == TokenType.Eof;
 }
 
+class ThisExpression : Expression
+{
+    public readonly Token Keyword;
+
+    public ThisExpression(Token keyword)
+    {
+        Keyword = keyword;
+    }
+
+    public override void Resolve(Resolver resolver)
+    {
+        if (resolver.CurrentClass == ClassType.None)
+        {
+            Program.Error(Keyword, "Can't use 'this' outside of a class.");
+            return;
+        }
+
+        resolver.ResolveLocal(this, Keyword);
+    }
+
+    public override object? Evaluate(Interpreter interpreter)
+    {
+        return interpreter.LookupVariable(Keyword, this);
+    }
+}
+
 class SetExpression : Expression
 {
     public readonly Expression Object;
@@ -1634,7 +1664,7 @@ class ClassDeclaration : Statement
         var methods = new Dictionary<string, RuntimeFunction>();
         foreach (var method in Methods)
         {
-            var function = new RuntimeFunction(method, interpreter.Environment);
+            var function = new RuntimeFunction(method, interpreter.Environment, method.Name.Lexeme == "init");
             methods[method.Name.Lexeme] = function;
         }
 
@@ -1644,13 +1674,23 @@ class ClassDeclaration : Statement
 
     public override void Resolve(Resolver resolver)
     {
+        var enclosingClass = resolver.CurrentClass;
+        resolver.CurrentClass = ClassType.Class;
+
         resolver.Declare(Name);
         resolver.Define(Name);
 
+        resolver.BeginScope();
+        resolver.Scopes[^1]["this"] = true;
+
         foreach (var method in Methods)
         {
-            resolver.ResolveFunction(method, FunctionType.Method);
+            resolver.ResolveFunction(method, method.Name.Lexeme == "init" ? FunctionType.Initializer : FunctionType.Method);
         }
+
+        resolver.EndScope();
+
+        resolver.CurrentClass = enclosingClass;
     }
 }
 
@@ -1659,7 +1699,14 @@ class RuntimeClass : Callable
     public readonly string Name;
     private readonly Dictionary<string, RuntimeFunction> methods;
 
-    public override int Arity => 0;
+    public override int Arity
+    {
+        get
+        {
+            var initializer = FindMethod("init");
+            return initializer?.Arity ?? 0;
+        }
+    }
 
     public RuntimeClass(string name, Dictionary<string, RuntimeFunction> methods)
     {
@@ -1669,7 +1716,10 @@ class RuntimeClass : Callable
 
     public override object? Call(Interpreter interpreter, List<object?> arguments)
     {
-        return new RuntimeClassInstance(this);
+        var instance = new RuntimeClassInstance(this);
+        var initializer = FindMethod("init");
+        initializer?.Bind(instance).Call(interpreter, arguments);
+        return instance;
     }
 
     public override string ToString()
@@ -1677,9 +1727,9 @@ class RuntimeClass : Callable
         return Name;
     }
 
-    public bool TryGetMethod(string lexeme, [MaybeNullWhen(false)] out RuntimeFunction method)
+    public RuntimeFunction? FindMethod(string name)
     {
-        return methods.TryGetValue(lexeme, out method);
+        return methods.TryGetValue(name, out var method) ? method : null;
     }
 }
 
@@ -1704,10 +1754,13 @@ class RuntimeClassInstance
         {
             return value;
         }
-        else if (Class.TryGetMethod(name.Lexeme, out var method))
+
+        var method = Class.FindMethod(name.Lexeme);
+        if (method != null)
         {
-            return method;
+            return method.Bind(this);
         }
+
         throw new RuntimeException(name, $"Undefined property '{name.Lexeme}'.");
     }
 
@@ -1740,7 +1793,15 @@ class ReturnStatement : Statement
             Program.Error(Keyword, "Can't return from top-level code.");
         }
 
-        Value?.Resolve(resolver);
+        if (Value != null)
+        {
+            if (resolver.CurrentFunction == FunctionType.Initializer)
+            {
+                Program.Error(Keyword, "Can't return a value from an initializer.");
+            }
+
+            Value.Resolve(resolver);
+        }
     }
 }
 
@@ -1769,7 +1830,7 @@ class FunctionDeclaration : Statement
 
     public override void Execute(Interpreter interpreter)
     {
-        var function = new RuntimeFunction(this, interpreter.Environment);
+        var function = new RuntimeFunction(this, interpreter.Environment, false);
         interpreter.Environment.Define(Name.Lexeme, function);
     }
 
@@ -1909,13 +1970,15 @@ class RuntimeFunction : Callable
 {
     private readonly FunctionDeclaration declaration;
     private readonly Environment closure;
+    private readonly bool isInitializer;
 
     public override int Arity => declaration.Parameters.Count;
 
-    public RuntimeFunction(FunctionDeclaration declaration, Environment closure)
+    public RuntimeFunction(FunctionDeclaration declaration, Environment closure, bool isInitializer)
     {
         this.declaration = declaration;
         this.closure = closure;
+        this.isInitializer = isInitializer;
     }
 
     public override object? Call(Interpreter interpreter, List<object?> arguments)
@@ -1932,11 +1995,18 @@ class RuntimeFunction : Callable
         }
         catch (ReturnException exception)
         {
-            return exception.Value;
+            return isInitializer ? closure.GetAt(0, "this") : exception.Value;
         }
         return null;
     }
 
+    public RuntimeFunction Bind(RuntimeClassInstance instance)
+    {
+        var environment = new Environment(closure);
+        environment.Define("this", instance);
+        return new RuntimeFunction(declaration, environment, isInitializer);
+    }
+ 
     public override string ToString()
     {
         return $"<fn {declaration.Name.Lexeme}>";
@@ -1950,6 +2020,7 @@ class Resolver
     public readonly List<Dictionary<string, bool>> Scopes = new();
 
     public FunctionType CurrentFunction = FunctionType.None;
+    public ClassType CurrentClass = ClassType.None;
 
     public Resolver(Interpreter interpreter)
     {
@@ -2030,4 +2101,11 @@ enum FunctionType
     None,
     Function,
     Method,
+    Initializer,
+}
+
+enum ClassType
+{
+    None,
+    Class,
 }
