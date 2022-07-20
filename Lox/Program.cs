@@ -1067,6 +1067,14 @@ class Parser
     private Statement ClassDeclaration()
     {
         var name = Consume(TokenType.Identifier, "Expect class name.");
+
+        VariableExpression? superclass = null;
+        if (Match(TokenType.Less))
+        {
+            Consume(TokenType.Identifier, "Expect superclass name.");
+            superclass = new VariableExpression(Previous());
+        }
+
         Consume(TokenType.LeftBrace, "Expect '{' before class body.");
 
         var methods = new List<FunctionDeclaration>();
@@ -1077,7 +1085,7 @@ class Parser
 
         Consume(TokenType.RightBrace, "Expect '}' after class body.");
 
-        return new ClassDeclaration(name, methods);
+        return new ClassDeclaration(name, superclass, methods);
     }
 
     private FunctionDeclaration FunctionDeclaration(string kind)
@@ -1453,6 +1461,13 @@ class Parser
         {
             return new LiteralExpression(Previous().Literal);
         }
+        else if (Match(TokenType.Super))
+        {
+            var keyword = Previous();
+            Consume(TokenType.Dot, "Expect '.' after 'super'.");
+            var method = Consume(TokenType.Identifier, "Expect superclass method name.");
+            return new SuperExpression(keyword, method);
+        }
         else if (Match(TokenType.This))
         {
             return new ThisExpression(Previous());
@@ -1560,6 +1575,54 @@ class Parser
     private bool IsAtEnd => Peek().Type == TokenType.Eof;
 }
 
+class SuperExpression : Expression
+{
+    public readonly Token Keyword;
+    public readonly Token Method;
+
+    public SuperExpression(Token keyword, Token method)
+    {
+        Keyword = keyword;
+        Method = method;
+    }
+
+    public override object? Evaluate(Interpreter interpreter)
+    {
+        var depth = interpreter.Locals[this];
+        if (interpreter.Environment.GetAt(depth, "super") is not RuntimeClass superclass)
+        {
+            throw new InvalidOperationException(); // Should not happen.
+        }
+
+        if (interpreter.Environment.GetAt(depth - 1, "this") is not RuntimeClassInstance thisObject)
+        {
+            throw new InvalidOperationException(); // Should not happen.
+        }
+
+        var method = superclass.FindMethod(Method.Lexeme);
+        if (method == null)
+        {
+            throw new RuntimeException(Method, $"Undefined property '{Method.Lexeme}'.");
+        }
+
+        return method.Bind(thisObject);
+    }
+
+    public override void Resolve(Resolver resolver)
+    {
+        if (resolver.CurrentClass == ClassType.None)
+        {
+            Program.Error(Keyword, "Can't use 'super' outside of a class.");
+        }
+        else if (resolver.CurrentClass == ClassType.Class)
+        {
+            Program.Error(Keyword, "Can't use 'super' in a class with no superclass.");
+        }
+
+        resolver.ResolveLocal(this, Keyword);
+    }
+}
+
 class ThisExpression : Expression
 {
     public readonly Token Keyword;
@@ -1649,17 +1712,36 @@ class GetExpression : Expression
 class ClassDeclaration : Statement
 {
     public readonly Token Name;
+    public readonly VariableExpression? Superclass;
     public readonly List<FunctionDeclaration> Methods;
 
-    public ClassDeclaration(Token name, List<FunctionDeclaration> methods)
+    public ClassDeclaration(Token name, VariableExpression? superclass, List<FunctionDeclaration> methods)
     {
         Name = name;
+        Superclass = superclass;
         Methods = methods;
     }
 
     public override void Execute(Interpreter interpreter)
     {
+        RuntimeClass? superclass = null;
+        if (Superclass != null)
+        {
+            var superclassValue = Superclass.Evaluate(interpreter);
+            if (superclassValue is not RuntimeClass superclassCheckedValue)
+            {
+                throw new RuntimeException(Superclass.Name, "Superclass must be a class.");
+            }
+            superclass = superclassCheckedValue;
+        }
+
         interpreter.Environment.Define(Name.Lexeme, null);
+
+        if (Superclass != null)
+        {
+            interpreter.Environment = new Environment(interpreter.Environment);
+            interpreter.Environment.Define("super", superclass);
+        }
 
         var methods = new Dictionary<string, RuntimeFunction>();
         foreach (var method in Methods)
@@ -1668,7 +1750,19 @@ class ClassDeclaration : Statement
             methods[method.Name.Lexeme] = function;
         }
 
-        var cls = new RuntimeClass(Name.Lexeme, methods);
+        var cls = new RuntimeClass(Name.Lexeme, superclass, methods);
+
+        if (Superclass != null)
+        {
+            var environment = interpreter.Environment.Enclosing;
+            if (environment == null)
+            {
+                throw new InvalidOperationException(); // Should not happen.
+            }
+
+            interpreter.Environment = environment;
+        }
+
         interpreter.Environment.Assign(Name, cls);
     }
 
@@ -1680,6 +1774,19 @@ class ClassDeclaration : Statement
         resolver.Declare(Name);
         resolver.Define(Name);
 
+        if (Superclass != null)
+        {
+            resolver.CurrentClass = ClassType.Subclass;
+            if (Superclass.Name.Lexeme == Name.Lexeme)
+            {
+                Program.Error(Superclass.Name, "A class can't inherit from itself.");
+            }
+            Superclass.Resolve(resolver);
+
+            resolver.BeginScope();
+            resolver.Scopes[^1]["super"] = true;
+        }
+
         resolver.BeginScope();
         resolver.Scopes[^1]["this"] = true;
 
@@ -1690,6 +1797,11 @@ class ClassDeclaration : Statement
 
         resolver.EndScope();
 
+        if (Superclass != null)
+        {
+            resolver.EndScope();
+        }
+
         resolver.CurrentClass = enclosingClass;
     }
 }
@@ -1697,6 +1809,7 @@ class ClassDeclaration : Statement
 class RuntimeClass : Callable
 {
     public readonly string Name;
+    public readonly RuntimeClass? Superclass;
     private readonly Dictionary<string, RuntimeFunction> methods;
 
     public override int Arity
@@ -1708,9 +1821,10 @@ class RuntimeClass : Callable
         }
     }
 
-    public RuntimeClass(string name, Dictionary<string, RuntimeFunction> methods)
+    public RuntimeClass(string name, RuntimeClass? superclass, Dictionary<string, RuntimeFunction> methods)
     {
         Name = name;
+        Superclass = superclass;
         this.methods = methods;
     }
 
@@ -1729,7 +1843,11 @@ class RuntimeClass : Callable
 
     public RuntimeFunction? FindMethod(string name)
     {
-        return methods.TryGetValue(name, out var method) ? method : null;
+        if (methods.TryGetValue(name, out var method))
+        {
+            return method;
+        }
+        return Superclass?.FindMethod(name);
     }
 }
 
@@ -2108,4 +2226,5 @@ enum ClassType
 {
     None,
     Class,
+    Subclass,
 }
