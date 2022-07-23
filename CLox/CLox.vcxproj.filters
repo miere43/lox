@@ -7,6 +7,8 @@
     <ClCompile Include="debug.c" />
     <ClCompile Include="value.c" />
     <ClCompile Include="vm.c" />
+    <ClCompile Include="compiler.c" />
+    <ClCompile Include="scanner.c" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="common.h" />
@@ -15,5 +17,7 @@
     <ClInclude Include="debug.h" />
     <ClInclude Include="value.h" />
     <ClInclude Include="vm.h" />
+    <ClInclude Include="compiler.h" />
+    <ClInclude Include="scanner.h" />
   </ItemGroup>
 </Project>
