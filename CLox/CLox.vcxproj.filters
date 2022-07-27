@@ -9,6 +9,7 @@
     <ClCompile Include="vm.c" />
     <ClCompile Include="compiler.c" />
     <ClCompile Include="scanner.c" />
+    <ClCompile Include="object.c" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="common.h" />
@@ -19,5 +20,6 @@
     <ClInclude Include="vm.h" />
     <ClInclude Include="compiler.h" />
     <ClInclude Include="scanner.h" />
+    <ClInclude Include="object.h" />
   </ItemGroup>
 </Project>
