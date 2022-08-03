@@ -158,7 +158,7 @@ static ObjFunction* endCompiler() {
 
 #ifdef DEBUG_PRINT_CODE
 	if (!parser.hadError) {
-		disassembleChunk(currentChunk(), function->name ? function->name->chars : "code");
+		disassembleChunk(currentChunk(), function->name ? function->name->chars : "<script>");
 	}
 #endif
 
@@ -691,7 +691,6 @@ static void function(FunctionType type) {
 	consume(TOKEN_RIGHT_PAREN, "Expect ')' after parameters.");
 	consume(TOKEN_LEFT_BRACE, "Expect '{' before function body.");
 	block();
-	endScope();
 
 	ObjFunction* function = endCompiler();
 	emitBytes(OP_CONSTANT, makeConstant(OBJ_VAL(function)));
