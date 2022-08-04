@@ -14,6 +14,7 @@
 static Obj* allocateObject(size_t size, ObjType objectType) {
 	Obj* obj = (Obj*)reallocate(NULL, 0, size);
 	obj->type = objectType;
+	obj->isMarked = false;
 	obj->next = vm.objects;
 	vm.objects = obj;
 	return obj;
@@ -23,8 +24,10 @@ static ObjString* allocateString(const char* chars, int length, uint32_t hash) {
 	ObjString* string = ALLOCATE_OBJ(ObjString, OBJ_STRING);
 	string->chars = (char*)chars;
 	string->length = length;
-	string->hash = hash;
+	string->hash = hash;	
+	push(OBJ_VAL(string));
 	tableSet(&vm.strings, string, NIL_VAL);
+	pop();
 	return string;
 }
 
